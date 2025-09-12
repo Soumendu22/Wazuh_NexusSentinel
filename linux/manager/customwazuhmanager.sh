@@ -163,9 +163,55 @@ else
     print_warning "Configuration validation failed, but service is running"
 fi
 
+# Step 6: YARA Malware Detection Integration Setup
+print_status "Starting YARA Malware Detection Integration after VirusTotal setup..."
+echo
+print_status "YARA will provide advanced malware detection capabilities"
+
+# Download and run YARA manager integration script
+print_status "Downloading YARA manager integration script..."
+if curl -LO "https://raw.githubusercontent.com/Soumendu22/Wazuh_NexusSentinel/master/linux/manager/yaramodelmanager.sh"; then
+    print_success "Downloaded YARA manager integration script"
+else
+    print_error "Failed to download from GitHub, looking for local copy..."
+    # Try to find local copy
+    if [ -f "/opt/yaramodelmanager.sh" ]; then
+        cp "/opt/yaramodelmanager.sh" "./yaramodelmanager.sh"
+        print_success "Using local YARA manager script"
+    elif [ -f "$(dirname "$0")/yaramodelmanager.sh" ]; then
+        cp "$(dirname "$0")/yaramodelmanager.sh" "./yaramodelmanager.sh"
+        print_success "Using YARA manager script from same directory"
+    else
+        print_error "No YARA manager script found. Please ensure the script is available."
+        print_warning "Skipping YARA integration - you can run it manually later"
+        print_status "Manual command: sudo ./yaramodelmanager.sh"
+        # Continue without YARA integration
+        YARA_SKIPPED=true
+    fi
+fi
+
+if [[ "$YARA_SKIPPED" != "true" ]]; then
+    # Make the script executable
+    chmod +x yaramodelmanager.sh
+    
+    # Run YARA manager integration
+    print_status "Running YARA manager integration..."
+    if ./yaramodelmanager.sh; then
+        print_success "YARA manager integration completed successfully"
+    else
+        print_error "YARA manager integration failed"
+        print_status "You can run it manually later with: sudo ./yaramodelmanager.sh"
+    fi
+fi
+
 # Cleanup temporary directory
 cd /
 rm -rf "$TEMP_DIR"
+
+# Clean up downloaded YARA script if it exists
+if [ -f "./yaramodelmanager.sh" ]; then
+    rm -f "./yaramodelmanager.sh"
+fi
 
 # Final status report
 print_success "Custom Wazuh Manager setup completed successfully!"
@@ -173,6 +219,11 @@ echo
 print_status "Setup Summary:"
 echo "  ✓ Configuration backup created: $BACKUP_DIR"
 echo "  ✓ VirusTotal integration configured"
+if [[ "$YARA_SKIPPED" != "true" ]]; then
+    echo "  ✓ YARA malware detection configured"
+else
+    echo "  ! YARA integration skipped (can be run manually)"
+fi
 echo "  ✓ Wazuh Manager service restarted"
 echo "  ✓ Service status verified"
 echo
@@ -185,7 +236,18 @@ echo
 print_status "Next Steps:"
 echo "  1. Configure Wazuh agents using the custom agent script"
 echo "  2. Test VirusTotal integration with EICAR test file"
-echo "  3. Monitor alerts in Wazuh dashboard"
+if [[ "$YARA_SKIPPED" != "true" ]]; then
+    echo "  3. Test YARA integration by adding suspicious files to /tmp/yara/malware"
+    echo "  4. Monitor alerts in Wazuh dashboard with filters: rule.groups:yara"
+else
+    echo "  3. Run YARA integration manually: sudo ./yaramodelmanager.sh"
+    echo "  4. Monitor alerts in Wazuh dashboard"
+fi
 echo
+if [[ "$YARA_SKIPPED" == "true" ]]; then
+    print_warning "To complete YARA integration manually:"
+    echo "  sudo ./yaramodelmanager.sh"
+    echo
+fi
 print_warning "Note: If you encounter issues, use the restore script to revert changes"
 print_status "Setup completed at $(date)"
