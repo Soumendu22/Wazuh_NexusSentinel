@@ -179,7 +179,7 @@ fi
 
 # Step 5: Validate configuration syntax
 print_status "Validating Wazuh configuration syntax..."
-if /var/ossec/bin/wazuh-logtest-legacy -t 2>/dev/null; then
+if /var/ossec/bin/wazuh-logtest -t 2>/dev/null || /var/ossec/bin/wazuh-logtest-legacy -t 2>/dev/null; then
     print_success "Configuration syntax is valid"
 else
     print_warning "Configuration validation had some warnings - check manually if needed"
@@ -220,8 +220,13 @@ print_success "Created restore script at $BACKUP_DIR/restore_yara.sh"
 
 # Step 7: Restart Wazuh manager
 print_status "Restarting Wazuh manager to apply configuration changes..."
-systemctl restart wazuh-manager
-print_success "Wazuh manager restarted"
+if systemctl restart wazuh-manager; then
+    print_success "Wazuh manager restarted successfully"
+else
+    print_error "Failed to restart Wazuh manager"
+    print_status "You can restore the original configuration using: $BACKUP_DIR/restore_yara.sh"
+    exit 1
+fi
 
 # Wait for service to be ready
 print_status "Waiting for Wazuh manager to be fully ready..."
@@ -239,7 +244,7 @@ fi
 
 # Step 9: Test rule compilation
 print_status "Testing rule compilation..."
-if /var/ossec/bin/wazuh-logtest-legacy -t &>/dev/null; then
+if /var/ossec/bin/wazuh-logtest -t &>/dev/null || /var/ossec/bin/wazuh-logtest-legacy -t &>/dev/null; then
     print_success "All rules compiled successfully"
 else
     print_warning "Rule compilation had warnings - integration should still work"
