@@ -53,32 +53,44 @@ cat >> /var/ossec/etc/rules/local_rules.xml << 'EOF'
 EOF
 
 # Step 2: Add VirusTotal integration to ossec.conf
-sed -i "$i\<integration>\n<name>virustotal</name>\n<api_key>$VIRUSTOTAL_API_KEY</api_key>\n<rule_id>100200,100201,100210,100211</rule_id>\n<alert_format>json</alert_format>\n</integration>" /var/ossec/etc/ossec.conf
+# Find the line before </ossec_config> and insert the integration block
+sed -i '/<\/ossec_config>/i\<integration>\n<name>virustotal</name>\n<api_key>'"$VIRUSTOTAL_API_KEY"'</api_key>\n<rule_id>100200,100201,100210,100211</rule_id>\n<alert_format>json</alert_format>\n</integration>' /var/ossec/etc/ossec.conf
 
 # Step 3: Add Active Response configuration to ossec.conf
-cat >> /var/ossec/etc/ossec.conf << 'EOF'
-<command>
-<name>remove-threat</name>
-<executable>remove-threat.sh</executable>
-<timeout_allowed>no</timeout_allowed>
-</command>
+sed -i '/<\/ossec_config>/i\<command>\n<name>remove-threat</name>\n<executable>remove-threat.sh</executable>\n<timeout_allowed>no</timeout_allowed>\n</command>\n\n<command>\n<name>remove-threat-windows</name>\n<executable>remove-threat.exe</executable>\n<timeout_allowed>no</timeout_allowed>\n</command>\n\n<active-response>\n<disabled>no</disabled>\n<command>remove-threat</command>\n<location>local</location>\n<rules_id>87105</rules_id>\n</active-response>' /var/ossec/etc/ossec.conf
 
-<command>
-<name>remove-threat-windows</name>
-<executable>remove-threat.exe</executable>
-<timeout_allowed>no</timeout_allowed>
-</command>
+# Step 4: Create Active Response script
+cat > /var/ossec/active-response/bin/remove-threat.sh << 'EOF'
+#!/bin/bash
+# Remove threat script for VirusTotal integration
 
-<active-response>
-<disabled>no</disabled>
-<command>remove-threat</command>
-<location>local</location>
-<rules_id>87105</rules_id>
-</active-response>
-</ossec_config>
+LOG_FILE="/var/ossec/logs/active-response.log"
+
+# Read alert from stdin
+read INPUT_JSON
+
+# Extract file path from JSON
+FILE_PATH=$(echo "$INPUT_JSON" | jq -r '.data.virustotal.source.file // empty')
+
+if [ -n "$FILE_PATH" ] && [ -f "$FILE_PATH" ]; then
+    # Remove the file
+    if rm -f "$FILE_PATH"; then
+        echo "$(date) - Successfully removed threat: $FILE_PATH" >> "$LOG_FILE"
+        echo "Successfully removed threat"
+    else
+        echo "$(date) - Error removing threat: $FILE_PATH" >> "$LOG_FILE"
+        echo "Error removing threat"
+    fi
+else
+    echo "$(date) - File not found or invalid path: $FILE_PATH" >> "$LOG_FILE"
+    echo "Error removing threat"
+fi
 EOF
 
-# Step 4: Add Active Response result rules to local_rules.xml
+# Make the script executable
+chmod +x /var/ossec/active-response/bin/remove-threat.sh
+
+# Step 5: Add Active Response result rules to local_rules.xml
 cat >> /var/ossec/etc/rules/local_rules.xml << 'EOF'
 <group name="virustotal,">
 <rule id="100092" level="12">
@@ -95,7 +107,7 @@ cat >> /var/ossec/etc/rules/local_rules.xml << 'EOF'
 </group>
 EOF
 
-# Step 5: Restart Wazuh manager
+# Step 6: Restart Wazuh manager
 sudo systemctl restart wazuh-manager
 
 echo "Wazuh Manager VirusTotal integration configured successfully!"
