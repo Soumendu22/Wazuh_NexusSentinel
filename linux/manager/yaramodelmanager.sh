@@ -84,32 +84,38 @@ fi
 
 # Add YARA-specific rules to local_rules.xml
 if ! grep -q "rule id=\"100300\"" /var/ossec/etc/rules/local_rules.xml; then
-    sed -i '/<\/group>/i\
-\
-<group name="syscheck,">\
-  <rule id="100300" level="7">\
-    <if_sid>550</if_sid>\
-    <field name="file">/tmp/yara/malware/</field>\
-    <description>File modified in /tmp/yara/malware/ directory.</description>\
-  </rule>\
-  <rule id="100301" level="7">\
-    <if_sid>554</if_sid>\
-    <field name="file">/tmp/yara/malware/</field>\
-    <description>File added to /tmp/yara/malware/ directory.</description>\
-  </rule>\
-</group>\
-\
-<group name="yara,">\
-  <rule id="108000" level="0">\
-    <decoded_as>yara_decoder</decoded_as>\
-    <description>Yara grouping rule</description>\
-  </rule>\
-  <rule id="108001" level="12">\
-    <if_sid>108000</if_sid>\
-    <match>wazuh-yara: INFO - Scan result: </match>\
-    <description>File "$(yara_scanned_file)" is a positive match. Yara rule: $(yara_rule)</description>\
-  </rule>\
-</group>' /var/ossec/etc/rules/local_rules.xml
+    # Create a temporary file with YARA rules
+    cat > /tmp/yara_rules.xml << 'EOF'
+
+<group name="syscheck,">
+  <rule id="100300" level="7">
+    <if_sid>550</if_sid>
+    <field name="file">/tmp/yara/malware/</field>
+    <description>File modified in /tmp/yara/malware/ directory.</description>
+  </rule>
+  <rule id="100301" level="7">
+    <if_sid>554</if_sid>
+    <field name="file">/tmp/yara/malware/</field>
+    <description>File added to /tmp/yara/malware/ directory.</description>
+  </rule>
+</group>
+
+<group name="yara,">
+  <rule id="108000" level="0">
+    <decoded_as>yara_decoder</decoded_as>
+    <description>Yara grouping rule</description>
+  </rule>
+  <rule id="108001" level="12">
+    <if_sid>108000</if_sid>
+    <match>wazuh-yara: INFO - Scan result: </match>
+    <description>File "$(yara_scanned_file)" is a positive match. Yara rule: $(yara_rule)</description>
+  </rule>
+</group>
+EOF
+
+    # Append the rules to the end of the file
+    cat /tmp/yara_rules.xml >> /var/ossec/etc/rules/local_rules.xml
+    rm -f /tmp/yara_rules.xml
     print_success "YARA detection rules added to local_rules.xml"
 else
     print_warning "YARA rules already exist in local_rules.xml"
@@ -135,17 +141,23 @@ fi
 
 # Add YARA-specific decoders to local_decoder.xml
 if ! grep -q "yara_decoder" /var/ossec/etc/decoders/local_decoder.xml; then
-    sed -i '/<\/decoder>/a\
-\
-<decoder name="yara_decoder">\
-  <prematch>wazuh-yara:</prematch>\
-</decoder>\
-\
-<decoder name="yara_decoder1">\
-  <parent>yara_decoder</parent>\
-  <regex>wazuh-yara: (\\S+) - Scan result: (\\S+) (\\S+)</regex>\
-  <order>log_type, yara_rule, yara_scanned_file</order>\
-</decoder>' /var/ossec/etc/decoders/local_decoder.xml
+    # Create a temporary file with YARA decoders
+    cat > /tmp/yara_decoders.xml << 'EOF'
+
+<decoder name="yara_decoder">
+  <prematch>wazuh-yara:</prematch>
+</decoder>
+
+<decoder name="yara_decoder1">
+  <parent>yara_decoder</parent>
+  <regex>wazuh-yara: (\S+) - Scan result: (\S+) (\S+)</regex>
+  <order>log_type, yara_rule, yara_scanned_file</order>
+</decoder>
+EOF
+
+    # Append the decoders to the end of the file
+    cat /tmp/yara_decoders.xml >> /var/ossec/etc/decoders/local_decoder.xml
+    rm -f /tmp/yara_decoders.xml
     print_success "YARA decoders added to local_decoder.xml"
 else
     print_warning "YARA decoders already exist in local_decoder.xml"
@@ -156,29 +168,54 @@ print_status "Configuring Active Response for YARA integration..."
 
 # Check if YARA Active Response already exists
 if ! grep -q "yara_linux" /var/ossec/etc/ossec.conf; then
-    # Add YARA Active Response configuration
-    sed -i '/<\/ossec_config>/i\
-\
-  <command>\
-    <name>yara_linux</name>\
-    <executable>yara.sh</executable>\
-    <extra_args>-yara_path /usr/local/bin -yara_rules /tmp/yara/rules/yara_rules.yar</extra_args>\
-    <timeout_allowed>no</timeout_allowed>\
-  </command>\
-\
-  <active-response>\
-    <disabled>no</disabled>\
-    <command>yara_linux</command>\
-    <location>local</location>\
-    <rules_id>100300,100301</rules_id>\
-  </active-response>' /var/ossec/etc/ossec.conf
-    print_success "YARA Active Response configuration added to ossec.conf"
+    # Create a temporary file with the new configuration
+    cat > /tmp/yara_config.xml << 'EOF'
+
+  <command>
+    <name>yara_linux</name>
+    <executable>yara.sh</executable>
+    <extra_args>-yara_path /usr/local/bin -yara_rules /tmp/yara/rules/yara_rules.yar</extra_args>
+    <timeout_allowed>no</timeout_allowed>
+  </command>
+
+  <active-response>
+    <disabled>no</disabled>
+    <command>yara_linux</command>
+    <location>local</location>
+    <rules_id>100300,100301</rules_id>
+  </active-response>
+EOF
+
+    # Insert the configuration before the closing </ossec_config> tag
+    if sed -i '/<\/ossec_config>/i\' /var/ossec/etc/ossec.conf && \
+       sed -i '/<\/ossec_config>/r /tmp/yara_config.xml' /var/ossec/etc/ossec.conf; then
+        print_success "YARA Active Response configuration added to ossec.conf"
+        rm -f /tmp/yara_config.xml
+    else
+        print_error "Failed to add YARA configuration to ossec.conf"
+        rm -f /tmp/yara_config.xml
+        exit 1
+    fi
 else
     print_warning "YARA Active Response configuration already exists in ossec.conf"
 fi
 
 # Step 5: Validate configuration syntax
 print_status "Validating Wazuh configuration syntax..."
+
+# First check XML syntax
+if command -v xmllint &> /dev/null; then
+    if xmllint --noout /var/ossec/etc/ossec.conf 2>/dev/null; then
+        print_success "XML syntax is valid"
+    else
+        print_error "XML syntax error in ossec.conf"
+        print_status "Restoring from backup..."
+        cp "$BACKUP_DIR/ossec.conf.backup" "/var/ossec/etc/ossec.conf"
+        exit 1
+    fi
+fi
+
+# Then check Wazuh-specific validation
 if /var/ossec/bin/wazuh-logtest -t 2>/dev/null || /var/ossec/bin/wazuh-logtest-legacy -t 2>/dev/null; then
     print_success "Configuration syntax is valid"
 else
@@ -219,12 +256,26 @@ chmod +x "$BACKUP_DIR/restore_yara.sh"
 print_success "Created restore script at $BACKUP_DIR/restore_yara.sh"
 
 # Step 7: Restart Wazuh manager
+print_status "Performing final validation before restart..."
+
+# Final validation before restart
+if command -v xmllint &> /dev/null; then
+    if ! xmllint --noout /var/ossec/etc/ossec.conf 2>/dev/null; then
+        print_error "Configuration file has XML syntax errors"
+        print_status "Restoring from backup: $BACKUP_DIR/restore_yara.sh"
+        bash "$BACKUP_DIR/restore_yara.sh"
+        exit 1
+    fi
+fi
+
 print_status "Restarting Wazuh manager to apply configuration changes..."
 if systemctl restart wazuh-manager; then
     print_success "Wazuh manager restarted successfully"
 else
     print_error "Failed to restart Wazuh manager"
     print_status "You can restore the original configuration using: $BACKUP_DIR/restore_yara.sh"
+    print_status "Attempting automatic restore..."
+    bash "$BACKUP_DIR/restore_yara.sh"
     exit 1
 fi
 
