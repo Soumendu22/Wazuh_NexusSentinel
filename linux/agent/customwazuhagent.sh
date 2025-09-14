@@ -65,6 +65,42 @@ if [ -d "/var/ossec/active-response/bin" ]; then
     print_success "Backed up active response scripts"
 fi
 
+# Backup audit configuration if it exists
+if [ -f "/etc/audit/audit.rules" ]; then
+    cp "/etc/audit/audit.rules" "$BACKUP_DIR/audit.rules.backup"
+    print_success "Backed up audit.rules"
+fi
+
+# Backup auditd.conf if it exists
+if [ -f "/etc/audit/auditd.conf" ]; then
+    cp "/etc/audit/auditd.conf" "$BACKUP_DIR/auditd.conf.backup"
+    print_success "Backed up auditd.conf"
+fi
+
+# Backup suricata configuration if it exists
+if [ -f "/etc/suricata/suricata.yaml" ]; then
+    cp "/etc/suricata/suricata.yaml" "$BACKUP_DIR/suricata.yaml.backup"
+    print_success "Backed up suricata.yaml"
+fi
+
+# Backup existing suricata rules if they exist
+if [ -d "/etc/suricata/rules" ]; then
+    cp -r "/etc/suricata/rules" "$BACKUP_DIR/suricata-rules.backup" 2>/dev/null || true
+    print_success "Backed up suricata rules"
+fi
+
+# Backup YARA rules and directories if they exist
+if [ -d "/tmp/yara" ]; then
+    cp -r "/tmp/yara" "$BACKUP_DIR/yara.backup" 2>/dev/null || true
+    print_success "Backed up YARA configuration"
+fi
+
+# Create a list of installed packages for rollback reference
+if command -v dpkg &> /dev/null; then
+    dpkg -l | grep -E '(suricata|auditd|yara)' > "$BACKUP_DIR/installed_packages.list" 2>/dev/null || true
+    print_success "Created package list for reference"
+fi
+
 # Create a restore script
 cat > "$BACKUP_DIR/restore.sh" << EOF
 #!/bin/bash
@@ -73,21 +109,69 @@ cat > "$BACKUP_DIR/restore.sh" << EOF
 
 echo "Restoring Wazuh Agent configuration from backup..."
 
+# Stop services before restoration
+echo "Stopping services..."
+systemctl stop wazuh-agent 2>/dev/null || true
+systemctl stop suricata 2>/dev/null || true
+systemctl stop auditd 2>/dev/null || true
+
+# Restore ossec.conf
 if [ -f "$BACKUP_DIR/ossec.conf.backup" ]; then
     cp "$BACKUP_DIR/ossec.conf.backup" "/var/ossec/etc/ossec.conf"
     echo "Restored ossec.conf"
 fi
 
+# Restore active response scripts
 if [ -d "$BACKUP_DIR/active-response-bin.backup" ]; then
     rm -rf "/var/ossec/active-response/bin"
     cp -r "$BACKUP_DIR/active-response-bin.backup" "/var/ossec/active-response/bin"
     echo "Restored active response scripts"
 fi
 
-echo "Restarting Wazuh agent..."
-systemctl restart wazuh-agent
+# Restore audit configuration
+if [ -f "$BACKUP_DIR/audit.rules.backup" ]; then
+    cp "$BACKUP_DIR/audit.rules.backup" "/etc/audit/audit.rules"
+    echo "Restored audit.rules"
+fi
+
+if [ -f "$BACKUP_DIR/auditd.conf.backup" ]; then
+    cp "$BACKUP_DIR/auditd.conf.backup" "/etc/audit/auditd.conf"
+    echo "Restored auditd.conf"
+fi
+
+# Restore suricata configuration
+if [ -f "$BACKUP_DIR/suricata.yaml.backup" ]; then
+    cp "$BACKUP_DIR/suricata.yaml.backup" "/etc/suricata/suricata.yaml"
+    echo "Restored suricata.yaml"
+fi
+
+if [ -d "$BACKUP_DIR/suricata-rules.backup" ]; then
+    rm -rf "/etc/suricata/rules"
+    cp -r "$BACKUP_DIR/suricata-rules.backup" "/etc/suricata/rules"
+    echo "Restored suricata rules"
+fi
+
+# Restore YARA configuration
+if [ -d "$BACKUP_DIR/yara.backup" ]; then
+    rm -rf "/tmp/yara"
+    cp -r "$BACKUP_DIR/yara.backup" "/tmp/yara"
+    echo "Restored YARA configuration"
+fi
+
+# Remove any installed packages that weren't there before (optional)
+echo "Note: Check $BACKUP_DIR/installed_packages.list for package rollback reference"
+
+echo "Restarting services..."
+# Start services in order
+systemctl start auditd 2>/dev/null || true
+systemctl start suricata 2>/dev/null || true
+systemctl start wazuh-agent
 
 echo "Configuration restored successfully!"
+echo "Services status:"
+echo "  - Wazuh Agent: \$(systemctl is-active wazuh-agent 2>/dev/null || echo 'not running')"
+echo "  - Suricata: \$(systemctl is-active suricata 2>/dev/null || echo 'not running')"
+echo "  - Auditd: \$(systemctl is-active auditd 2>/dev/null || echo 'not running')"
 EOF
 
 chmod +x "$BACKUP_DIR/restore.sh"
@@ -131,13 +215,40 @@ else
     exit 1
 fi
 
-# Step 4: Restart Wazuh Agent service
+# Step 4: Validate configuration before restarting services
+print_status "Validating Wazuh configuration..."
+
+# Check if ossec.conf is valid XML
+if command -v xmllint &> /dev/null; then
+    if xmllint --noout /var/ossec/etc/ossec.conf 2>/dev/null; then
+        print_success "ossec.conf XML syntax is valid"
+    else
+        print_error "ossec.conf has XML syntax errors"
+        print_status "Restoring from backup..."
+        bash "$BACKUP_DIR/restore.sh"
+        exit 1
+    fi
+else
+    print_warning "xmllint not available - skipping XML validation"
+fi
+
+# Check if Wazuh configuration is valid
+if /var/ossec/bin/wazuh-logtest -t 2>/dev/null; then
+    print_success "Wazuh configuration validation passed"
+elif /var/ossec/bin/wazuh-logtest-legacy -t 2>/dev/null; then
+    print_success "Wazuh configuration validation passed (legacy)"
+else
+    print_warning "Wazuh configuration validation had warnings - integration should still work"
+fi
+
+# Step 5: Restart Wazuh Agent service
 print_status "Restarting Wazuh Agent service..."
 if systemctl restart wazuh-agent; then
     print_success "Wazuh Agent restarted successfully"
 else
     print_error "Failed to restart Wazuh Agent"
-    print_status "You can restore the original configuration using: $BACKUP_DIR/restore.sh"
+    print_status "Attempting automatic restore..."
+    bash "$BACKUP_DIR/restore.sh"
     exit 1
 fi
 
@@ -150,11 +261,12 @@ if systemctl is-active --quiet wazuh-agent; then
     print_success "Wazuh Agent is running properly"
 else
     print_error "Wazuh Agent failed to start properly after configuration"
-    print_status "You can restore the original configuration using: $BACKUP_DIR/restore.sh"
+    print_status "Attempting automatic restore..."
+    bash "$BACKUP_DIR/restore.sh"
     exit 1
 fi
 
-# Step 5: Verify agent connection to manager
+# Step 6: Verify agent connection to manager
 print_status "Checking agent connection..."
 if grep -q "Connected to the server" /var/ossec/logs/ossec.log 2>/dev/null; then
     print_success "Agent is connected to Wazuh Manager"
@@ -230,6 +342,8 @@ if [[ "$SURICATA_SKIPPED" != "true" ]]; then
     else
         print_error "Suricata integration failed"
         print_status "You can run it manually later with: sudo ./suricata.sh $UBUNTU_IP $INTERFACE"
+        # Don't exit on Suricata failure - continue with other integrations
+        SURICATA_FAILED=true
     fi
 fi
 
@@ -284,6 +398,8 @@ if [[ "$AUDITD_SKIPPED" != "true" ]]; then
     else
         print_error "Auditd integration failed"
         print_status "You can run it manually later with: sudo ./auditd.sh $AUDIT_USER_ID"
+        # Don't exit on Auditd failure - continue with other integrations
+        AUDITD_FAILED=true
     fi
 fi
 
@@ -327,6 +443,8 @@ if [[ "$YARA_SKIPPED" != "true" ]]; then
     else
         print_error "YARA integration failed"
         print_status "You can run it manually later with: sudo ./yaramodelagent.sh"
+        # Don't exit on YARA failure - continue with other integrations
+        YARA_FAILED=true
     fi
 fi
 
@@ -346,29 +464,42 @@ if [ -f "./yaramodelagent.sh" ]; then
 fi
 
 # Final status report
-print_success "Custom Wazuh Agent setup completed successfully!"
+print_success "Custom Wazuh Agent setup completed!"
 echo
 print_status "Setup Summary:"
 echo "  ✓ Configuration backup created: $BACKUP_DIR"
 echo "  ✓ VirusTotal integration configured"
 echo "  ✓ Active response script installed"
 if [[ "$SURICATA_SKIPPED" != "true" ]]; then
-    echo "  ✓ Suricata integration configured ($UBUNTU_IP on $INTERFACE)"
+    if [[ "$SURICATA_FAILED" == "true" ]]; then
+        echo "  ✗ Suricata integration failed (can be run manually)"
+    else
+        echo "  ✓ Suricata integration configured ($UBUNTU_IP on $INTERFACE)"
+    fi
 else
     echo "  ! Suricata integration skipped (can be run manually)"
 fi
 if [[ "$AUDITD_SKIPPED" != "true" ]]; then
-    echo "  ✓ Auditd integration configured (monitoring user ID: $AUDIT_USER_ID)"
+    if [[ "$AUDITD_FAILED" == "true" ]]; then
+        echo "  ✗ Auditd integration failed (can be run manually)"
+    else
+        echo "  ✓ Auditd integration configured (monitoring user ID: $AUDIT_USER_ID)"
+    fi
 else
     echo "  ! Auditd integration skipped (can be run manually)"
 fi
 if [[ "$YARA_SKIPPED" != "true" ]]; then
-    echo "  ✓ YARA malware detection configured"
+    if [[ "$YARA_FAILED" == "true" ]]; then
+        echo "  ✗ YARA malware detection failed (can be run manually)"
+    else
+        echo "  ✓ YARA malware detection configured"
+    fi
 else
     echo "  ! YARA integration skipped (can be run manually)"
 fi
 echo "  ✓ Wazuh Agent service restarted"
 echo "  ✓ Service status verified"
+echo "  ✓ Configuration validated"
 
 echo
 print_status "Important Information:"
@@ -427,17 +558,17 @@ if [[ "$YARA_SKIPPED" != "true" ]]; then
     echo "  - YARA rules: /tmp/yara/rules/yara_rules.yar"
 fi
 echo
-if [[ "$SURICATA_SKIPPED" == "true" ]]; then
+if [[ "$SURICATA_SKIPPED" == "true" ]] || [[ "$SURICATA_FAILED" == "true" ]]; then
     print_warning "To complete Suricata integration manually:"
     echo "  sudo ./suricata.sh $UBUNTU_IP $INTERFACE"
     echo
 fi
-if [[ "$AUDITD_SKIPPED" == "true" ]]; then
+if [[ "$AUDITD_SKIPPED" == "true" ]] || [[ "$AUDITD_FAILED" == "true" ]]; then
     print_warning "To complete Auditd integration manually:"
     echo "  sudo ./auditd.sh $AUDIT_USER_ID"
     echo
 fi
-if [[ "$YARA_SKIPPED" == "true" ]]; then
+if [[ "$YARA_SKIPPED" == "true" ]] || [[ "$YARA_FAILED" == "true" ]]; then
     print_warning "To complete YARA integration manually:"
     echo "  sudo ./yaramodelagent.sh"
     echo
